@@ -1,0 +1,210 @@
+name: Build FAudio to Termux
+
+on:
+  push:
+    branches: [ gamenative-latest ]
+  pull_request:
+    branches: [ gamenative-latest ]
+  workflow_dispatch:
+
+jobs:
+  termux:
+    name: Build FAudio on Termux (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        arch: [ x86_64, aarch64 ]
+        # Define both architectures here
+        include:
+          - arch: x86_64
+            android_abi: x86_64
+          - arch: aarch64
+            android_abi: arm64-v8a
+      fail-fast: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install cmake ninja-build
+
+      - name: Download and extract termuxfs for ${{ matrix.arch }}
+        run: |
+          mkdir -p $HOME/termuxfs/${{ matrix.arch }}
+          cd $HOME/termuxfs/${{ matrix.arch }}
+          wget https://github.com/GameNative/termux-on-gha/releases/download/build-20260218/termuxfs-${{ matrix.arch }}.tar
+          tar -xf termuxfs-${{ matrix.arch }}.tar
+          ls -la $HOME/termuxfs/${{ matrix.arch }}/
+
+      - name: Cache Android NDK
+        id: cache-ndk
+        uses: actions/cache@v4
+        with:
+          path: ~/Android/Sdk/ndk/27.3.13750724
+          key: android-ndk-r27d
+
+      - name: Set up Android NDK
+        if: steps.cache-ndk.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p $HOME/Android/Sdk/ndk
+          cd $HOME/Android/Sdk/ndk
+          wget https://dl.google.com/android/repository/android-ndk-r27d-linux.zip
+          unzip -q android-ndk-r27d-linux.zip
+          mv android-ndk-r27d 27.3.13750724
+          
+      - name: Configure CMake (Android NDK)
+        env:
+          # Uses the latest NDK pre-installed on the GitHub runner
+          ANDROID_NDK: $HOME/Android/Sdk/ndk/27.3.13750724
+          TERMUX_PREFIX: $HOME/termuxfs/${{ matrix.arch }}/data/data/com.termux/files
+        run: |
+          cp ${{ env.TERMUX_PREFIX }}/usr/lib/libSDL2-2.0.so ${{ env.TERMUX_PREFIX }}/usr/lib/libSDL2-2.0.so.0
+          mkdir build
+          cd build
+          cmake .. \
+            -DCMAKE_TOOLCHAIN_FILE=${{ env.ANDROID_NDK }}/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=${{ matrix.android_abi }} \
+            -DANDROID_PLATFORM=android-28 \
+            -DANDROID_STL=c++_shared \
+            -DSDL2_INCLUDE_DIRS=${{ env.TERMUX_PREFIX }}/usr/include/SDL2 \
+            -DSDL2_LIBRARIES=${{ env.TERMUX_PREFIX }}/usr/lib/libSDL2-2.0.so.0 \
+            -DFFMPEG=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -GNinja
+
+      - name: Build FAudio
+        env:
+          # Uses the latest NDK pre-installed on the GitHub runner
+          ANDROID_NDK: $HOME/Android/Sdk/ndk/27.3.13750724
+        run: |
+          ninja -C build
+          # Optional: Strip the binary to reduce size for release
+          ${{ env.ANDROID_NDK }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip build/libFAudio.so
+
+      - name: Rename for Identification
+        run: mv build/libFAudio.so build/libFAudio-${{ matrix.arch }}.so
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: FAudio-Linux-${{ matrix.arch }}
+          path: build/libFAudio-${{ matrix.arch }}.so
+
+  windows-mingw:
+    name: Windows MinGW (${{ matrix.arch }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86
+            msystem: mingw32
+            pkg_prefix: mingw-w64-i686
+          - arch: x64
+            msystem: mingw64
+            pkg_prefix: mingw-w64-x86_64
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          install: >-
+            ${{ matrix.pkg_prefix }}-cc
+            ${{ matrix.pkg_prefix }}-cmake
+            ${{ matrix.pkg_prefix }}-ninja
+            ${{ matrix.pkg_prefix }}-pkg-config
+            ${{ matrix.pkg_prefix }}-SDL2
+
+      # If you still want the specific Wine-targeted build
+      - name: CMake configure (Release Wine)
+        run: cmake -B release -G Ninja . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release -DPLATFORM_WIN32=ON
+
+      - name: Build (Release Wine)
+        run: cmake --build release
+
+      - name: Package Binaries
+        run: |
+          ls -l release
+          mkdir dist
+          if [ -f "release/FAudio.dll" ]; then
+            cp release/FAudio.dll dist/FAudio-${{ matrix.arch }}.dll
+          fi
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FAudio-Win-${{ matrix.arch }}
+          path: dist/FAudio-${{ matrix.arch }}.dll
+
+  release:
+    name: Create GitHub Release
+    needs: [ termux, windows-mingw ]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download FAudio-Linux-x86_64 Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: FAudio-Linux-x86_64
+
+      - name: Download FAudio-Linux-aarch64 Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: FAudio-Linux-aarch64
+
+      - name: Download FAudio-Win-x86 Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: FAudio-Win-x86
+
+      - name: Download FAudio-Win-x64 Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: FAudio-Win-x64
+
+      - name: Generate date-based tag
+        id: generate_tag
+        run: |
+          DATE=$(date +%Y%m%d)
+          
+          # Get existing tags for today
+          EXISTING_TAGS=$(git tag -l "build-${DATE}-*" | sort -V | tail -1)
+          
+          if [ -z "$EXISTING_TAGS" ]; then
+            BUILD_NUMBER=1
+          else
+            # Extract build number from last tag and increment
+            BUILD_NUMBER=$(echo "$EXISTING_TAGS" | sed "s/build-${DATE}-//" | awk '{print $1 + 1}')
+          fi
+          
+          TAG_NAME="build-${DATE}-${BUILD_NUMBER}"
+          echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
+          echo "Generated tag: ${TAG_NAME}"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.generate_tag.outputs.tag_name }}
+          name: FAudio 24.10 (${{ steps.generate_tag.outputs.tag_name }})
+          files: |
+            FAudio-x86.dll
+            FAudio-x64.dll
+            libFAudio-x86_64.so
+            libFAudio-aarch64.so
+          draft: false
+          prerelease: false

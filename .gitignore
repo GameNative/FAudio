@@ -12,3 +12,4 @@ Release/
 xcuserdata/
 *.xcworkspace/
 *.xcscheme
+.idea
